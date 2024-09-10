@@ -1,0 +1,6 @@
+fastapi
+pydantic
+selenium
+beautifulsoup4
+pymongo
+uvicorn
