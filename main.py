@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, Security
 from pydantic import BaseModel
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -11,6 +11,11 @@ import logging
 import re
 import time
 from pymongo import MongoClient
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from fastapi.security.api_key import APIKeyHeader
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -19,12 +24,30 @@ app = FastAPI()
 client = MongoClient('mongodb+srv://mrithunjay26:77820897@comments.jx9xmpc.mongodb.net/')
 db = client['college_db']
 collection = db['essay_prompts']
+api_key_collection = db['api_keys']  # Collection for storing API keys
+limiter = Limiter(key_func=get_remote_address)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, lambda request, exc: HTTPException(status_code=429, detail="Rate limit exceeded"))
+app.add_middleware(SlowAPIMiddleware)
+API_KEY_NAME = "x-api-key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, lambda request, exc: HTTPException(status_code=429, detail="Rate limit exceeded"))
+app.add_middleware(SlowAPIMiddleware)
 class CollegeRequest(BaseModel):
     college_name: str
 
 class MultipleCollegesRequest(BaseModel):
     college_names: str
+async def verify_api_key(api_key: str = Security(api_key_header)):
+    if not api_key_collection.find_one({"key": api_key}):
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+    return api_key
 
 @app.middleware("http")
 async def log_request_time(request: Request, call_next):
@@ -143,7 +166,7 @@ def get_prompts_for_college(college_name):
     finally:
         driver.quit()
 
-@app.post("/get_essay_prompts/")
+@app.post("/get_essay_prompts/", dependencies=[Depends(verify_api_key), Depends(limiter.limit("5/minute"))])
 def get_essay_prompts(request: CollegeRequest):
     result = get_prompts_for_college(request.college_name)
     if result:
@@ -151,7 +174,7 @@ def get_essay_prompts(request: CollegeRequest):
     else:
         raise HTTPException(status_code=404, detail=f"No essay prompts found for {request.college_name}.")
 
-@app.post("/get_multiple_essay_prompts/")
+@app.post("/get_multiple_essay_prompts/", dependencies=[Depends(verify_api_key), Depends(limiter.limit("5/minute"))])
 def get_multiple_essay_prompts(request: MultipleCollegesRequest):
     college_names = [name.strip() for name in request.college_names.split(',')]
     results = {}
